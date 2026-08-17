@@ -8,15 +8,22 @@ import org.springframework.stereotype.Component;
 public class AppProperties {
 
     private final Lemana lemana = new Lemana();
+    private final Scheduler scheduler = new Scheduler();
 
     public Lemana getLemana() {
         return lemana;
     }
 
+    public Scheduler getScheduler() {
+        return scheduler;
+    }
+
     public static class Lemana {
         private String baseUrl = "https://kazan.lemanapro.ru";
-        private long requestDelayMs = 1500;
-        private String userAgent = "Mozilla/5.0 (compatible; CostMonitor/0.1)";
+        private long requestDelayMs = 2000;
+        private String userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+        private boolean headless = true;
+        private long navigationTimeoutMs = 45_000;
 
         public String getBaseUrl() {
             return baseUrl;
@@ -40,6 +47,52 @@ public class AppProperties {
 
         public void setUserAgent(String userAgent) {
             this.userAgent = userAgent;
+        }
+
+        public boolean isHeadless() {
+            return headless;
+        }
+
+        public void setHeadless(boolean headless) {
+            this.headless = headless;
+        }
+
+        public long getNavigationTimeoutMs() {
+            return navigationTimeoutMs;
+        }
+
+        public void setNavigationTimeoutMs(long navigationTimeoutMs) {
+            this.navigationTimeoutMs = navigationTimeoutMs;
+        }
+    }
+
+    public static class Scheduler {
+        private boolean priceUpdateEnabled = true;
+        private String priceUpdateCron = "0 0 10 * * *";
+        private String priceUpdateZone = "Europe/Moscow";
+
+        public boolean isPriceUpdateEnabled() {
+            return priceUpdateEnabled;
+        }
+
+        public void setPriceUpdateEnabled(boolean priceUpdateEnabled) {
+            this.priceUpdateEnabled = priceUpdateEnabled;
+        }
+
+        public String getPriceUpdateCron() {
+            return priceUpdateCron;
+        }
+
+        public void setPriceUpdateCron(String priceUpdateCron) {
+            this.priceUpdateCron = priceUpdateCron;
+        }
+
+        public String getPriceUpdateZone() {
+            return priceUpdateZone;
+        }
+
+        public void setPriceUpdateZone(String priceUpdateZone) {
+            this.priceUpdateZone = priceUpdateZone;
         }
     }
 }

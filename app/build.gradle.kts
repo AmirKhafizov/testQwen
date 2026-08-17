@@ -18,12 +18,12 @@ dependencies {
 
     // Utils
     implementation("org.apache.commons:commons-lang3:3.14.0")
+    implementation("com.fasterxml.jackson.core:jackson-databind")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
 
-    // Parsing (LemanaPro) - placeholders for now
+    // Parsing LemanaPro (Qrator protection requires real browser)
     implementation("org.jsoup:jsoup:1.18.1")
-    // Playwright can be added later when implementing real parser
-    // implementation("com.microsoft.playwright:playwright:1.47.0")
+    implementation("com.microsoft.playwright:playwright:1.47.0")
 
     // Dev
     developmentOnly("org.springframework.boot:spring-boot-devtools")

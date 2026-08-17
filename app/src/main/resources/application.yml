@@ -37,5 +37,12 @@ logging:
 app:
   lemana:
     base-url: https://kazan.lemanapro.ru
-    request-delay-ms: 1500
-    user-agent: Mozilla/5.0 (compatible; CostMonitor/0.1)
+    request-delay-ms: 2000
+    user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+    headless: true
+    navigation-timeout-ms: 45000
+  scheduler:
+    price-update-enabled: true
+    # Every day at 10:00 Europe/Moscow
+    price-update-cron: "0 0 10 * * *"
+    price-update-zone: Europe/Moscow
