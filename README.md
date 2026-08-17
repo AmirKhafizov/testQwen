@@ -2,39 +2,84 @@
 
 Система мониторинга цен строительных материалов (источник: kazan.lemanapro.ru через парсер) и прогнозирования стоимости объектов строительства на основе расхода из 1С.
 
-**Стек:** Java 21 · Spring Boot 3.3 · Gradle · PostgreSQL · Flyway · Testcontainers
+**Стек:** Java 21 · Spring Boot 3.3 · Gradle · PostgreSQL · Flyway · Testcontainers · Playwright
 
-## Возможности (план)
+## Что уже есть
 
-- Мультитенантность (несколько строительных компаний)
-- Справочник материалов компании + маппинг на товары LemanaPro
-- Парсер цен с kazan.lemanapro.ru
-- История цен и автоматический пересчёт прогнозной стоимости объектов
-- Интеграция с 1С (расход материалов)
-- Unit + Integration тесты
+- Мультитенантность (`company_id`)
+- Справочник материалов + маппинг на LemanaPro (`MaterialMapping`)
+- **Парсер цен LemanaPro** (Playwright, обход Qrator)
+- **Ежедневный job в 10:00 по Москве** (`Europe/Moscow`)
+- История цен (`material_prices`)
+- Admin API для ручного запуска и probe SKU
+- Unit-тесты парсера HTML + TenantContext
 
-## Структура проекта
+## Расписание парсера
 
+По умолчанию:
+
+```yaml
+app:
+  scheduler:
+    price-update-enabled: true
+    price-update-cron: "0 0 10 * * *"   # каждый день в 10:00
+    price-update-zone: Europe/Moscow
 ```
-cost-monitor/
-├── app/                          # основной модуль
-│   ├── src/main/java/.../costmonitor/
-│   │   ├── api/                  # REST controllers
-│   │   ├── application/          # application services
-│   │   ├── config/
-│   │   ├── domain/               # entities + repositories
-│   │   │   ├── company/
-│   │   │   ├── material/
-│   │   │   ├── external/
-│   │   │   ├── mapping/
-│   │   │   └── price/
-│   │   ├── infrastructure/       # parsers, external integrations
-│   │   │   └── price/
-│   │   └── tenant/
-│   └── src/main/resources/
-│       ├── application.yml
-│       └── db/migration/
-└── build.gradle.kts
+
+Job обновляет цены только для **CONFIRMED** маппингов всех активных компаний.
+
+## Парсер LemanaPro
+
+Сайт закрыт Qrator — обычный HTTP/Jsoup получает 403. Используется **Playwright (Chromium)**.
+
+### Установка браузера (один раз на машине)
+
+```bash
+# после сборки зависимостей
+./gradlew :app:dependencies
+
+# установить Chromium для Playwright
+java -cp "$(./gradlew -q :app:printClasspath 2>/dev/null || echo '')" \
+  com.microsoft.playwright.CLI install chromium
+
+# или проще, если есть npm:
+npx --yes playwright install chromium
+```
+
+Альтернатива через Maven-совместимый вызов:
+
+```bash
+./gradlew :app:bootRun   # при первом fetch Playwright сам подскажет команду install
+```
+
+Рекомендуемый способ из документации Playwright Java:
+
+```bash
+mvn exec:java -e -D exec.mainClass=com.microsoft.playwright.CLI -D exec.args="install chromium"
+```
+
+(при использовании Gradle можно скачать CLI jar из зависимости `com.microsoft.playwright:playwright`).
+
+### Как работает fetch по SKU
+
+1. Открывает `https://kazan.lemanapro.ru/search/?q={sku}`
+2. Ищет ссылку на карточку товара, содержащую артикул
+3. Открывает карточку и парсит цену (`PriceHtmlParser`: meta itemprop, CSS-классы, embedded JSON)
+4. Соблюдает `app.lemana.request-delay-ms` (по умолчанию 2 с)
+
+### Admin API (временно без auth)
+
+| Метод | URL | Описание |
+|-------|-----|----------|
+| POST | `/api/v1/admin/prices/refresh-all` | Как ночной job |
+| POST | `/api/v1/admin/prices/refresh/{companyId}` | Одна компания |
+| GET | `/api/v1/admin/prices/probe/{sku}` | Проверка цены без записи в БД |
+
+Пример:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/admin/prices/refresh-all
+curl http://localhost:8080/api/v1/admin/prices/probe/81976749
 ```
 
 ## Быстрый старт
@@ -42,10 +87,10 @@ cost-monitor/
 ### Требования
 
 - JDK 21+
-- Docker (для PostgreSQL / Testcontainers)
-- Gradle 8.10+ (или используйте wrapper после генерации)
+- Docker (PostgreSQL / Testcontainers)
+- Chromium для Playwright
 
-### Локальная БД
+### БД
 
 ```bash
 docker run -d --name cost-monitor-db \
@@ -58,12 +103,11 @@ docker run -d --name cost-monitor-db \
 ### Запуск
 
 ```bash
-# из корня репозитория
+gradle wrapper --gradle-version 8.10.2   # если нет wrapper
 ./gradlew :app:bootRun
 ```
 
-Приложение: http://localhost:8080  
-Ping: http://localhost:8080/api/v1/ping
+- Ping: http://localhost:8080/api/v1/ping
 
 ### Тесты
 
@@ -71,26 +115,32 @@ Ping: http://localhost:8080/api/v1/ping
 ./gradlew :app:test
 ```
 
-Тесты используют Testcontainers (нужен Docker).
+Unit-тесты `PriceHtmlParserTest` не требуют сети/браузера.
 
-## Gradle Wrapper
+## Структура (ключевое)
 
-Если wrapper ещё не сгенерирован:
-
-```bash
-gradle wrapper --gradle-version 8.10.2
+```
+infrastructure/price/
+  PriceProvider.java              # интерфейс
+  LemanaProParserProvider.java    # Playwright
+  PriceHtmlParser.java            # извлечение цены из HTML
+application/price/
+  PriceUpdateService.java         # обновление по маппингам
+  PriceUpdateScheduler.java       # cron 10:00 MSK
+api/
+  PriceAdminController.java       # ручной запуск / probe
 ```
 
 ## Дальнейшие шаги
 
-1. Реализовать полноценный парсер LemanaPro (Playwright / обход защиты)
-2. Сервис fuzzy-matching материалов
-3. Сущности ConstructionObject + расход из 1С
-4. Cost Calculation Engine
-5. Frontend (React)
-6. Spring Security + JWT
+1. Fuzzy-matching названий 1С ↔ LemanaPro + UI подтверждения
+2. ConstructionObject + расход из 1С
+3. Cost Calculation Engine (пересчёт при смене цены)
+4. Frontend (React)
+5. Spring Security + JWT
+6. Прокси / ротация при усилении защиты Qrator
 
 ## Источник цен
 
-На данный момент ориентируемся **только на парсер** сайта https://kazan.lemanapro.ru/  
-(B2B API Лемана ПРО отложен).
+Только **парсер** https://kazan.lemanapro.ru/  
+(B2B API отложен).
