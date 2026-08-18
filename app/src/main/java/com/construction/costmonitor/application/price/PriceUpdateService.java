@@ -43,22 +43,31 @@ public class PriceUpdateService {
     }
 
     /**
-     * Update prices for all active companies (used by scheduler).
+     * Обновление цен по всем активным компаниям (вызов из scheduler / admin API).
      */
     public int updatePricesForAllCompanies() {
         List<Company> companies = companyRepository.findAll().stream()
                 .filter(Company::isActive)
                 .toList();
 
+        log.info("Обновление цен: найдено активных компаний — {}", companies.size());
+        if (companies.isEmpty()) {
+            log.warn("Обновление цен: активных компаний нет, нечего обновлять");
+            return 0;
+        }
+
         int total = 0;
         for (Company company : companies) {
             try {
+                log.info("Обновление цен: компания id={}, код=«{}», название=«{}»",
+                        company.getId(), company.getCode(), company.getName());
                 total += updatePricesForCompany(company.getId());
             } catch (Exception e) {
-                log.error("Failed price update for company id={} code={}", company.getId(), company.getCode(), e);
+                log.error("Обновление цен: ошибка по компании id={}, код=«{}»: {}",
+                        company.getId(), company.getCode(), e.getMessage(), e);
             }
         }
-        log.info("Global price update finished, saved {} new price rows", total);
+        log.info("Обновление цен завершено по всем компаниям: сохранено новых записей — {}", total);
         return total;
     }
 
@@ -67,28 +76,44 @@ public class PriceUpdateService {
         List<MaterialMapping> mappings = mappingRepository.findByCompanyIdAndStatus(
                 companyId, MaterialMapping.Status.CONFIRMED);
 
+        log.info("Обновление цен: компания id={}, подтверждённых маппингов — {}",
+                companyId, mappings.size());
+
+        if (mappings.isEmpty()) {
+            log.warn("Обновление цен: у компании id={} нет маппингов со статусом CONFIRMED — пропускаем",
+                    companyId);
+            return 0;
+        }
+
         int updated = 0;
+        int failed = 0;
         for (MaterialMapping mapping : mappings) {
             Optional<ExternalProduct> productOpt =
                     externalProductRepository.findById(mapping.getExternalProductId());
             if (productOpt.isEmpty()) {
-                log.warn("External product {} missing for mapping {}", mapping.getExternalProductId(), mapping.getId());
+                log.warn("Обновление цен: внешний товар id={} не найден (маппинг id={}, материал id={})",
+                        mapping.getExternalProductId(), mapping.getId(), mapping.getMaterialId());
+                failed++;
                 continue;
             }
 
             ExternalProduct product = productOpt.get();
             String sku = product.getExternalSku();
 
+            log.info("Обновление цен: запрос цены — материал id={}, артикул [{}], маппинг id={}",
+                    mapping.getMaterialId(), sku, mapping.getId());
+
             Optional<PriceQuote> quoteOpt = priceProvider.fetchPrice(sku);
             if (quoteOpt.isEmpty()) {
-                log.warn("No price for sku={} materialId={}", sku, mapping.getMaterialId());
+                log.warn("Обновление цен: цена не получена — артикул [{}], материал id={}",
+                        sku, mapping.getMaterialId());
+                failed++;
                 continue;
             }
 
             PriceQuote quote = quoteOpt.get();
             savePrice(companyId, mapping.getMaterialId(), product.getId(), quote);
 
-            // keep external catalog name/url fresh
             if (quote.productName() != null && !quote.productName().isBlank()) {
                 product.setName(quote.productName());
             }
@@ -99,12 +124,12 @@ public class PriceUpdateService {
             externalProductRepository.save(product);
 
             updated++;
-            log.info("Saved price {} {} for materialId={} sku={}",
-                    quote.price(), quote.currency(), mapping.getMaterialId(), sku);
+            log.info("Обновление цен: сохранено — материал id={}, артикул [{}], цена {} {}, название «{}»",
+                    mapping.getMaterialId(), sku, quote.price(), quote.currency(), quote.productName());
         }
 
-        log.info("Price update finished for companyId={}, saved={}/{}",
-                companyId, updated, mappings.size());
+        log.info("Обновление цен по компании id={}: успешно {}, ошибок {}, всего маппингов {}",
+                companyId, updated, failed, mappings.size());
         return updated;
     }
 
@@ -119,5 +144,7 @@ public class PriceUpdateService {
         price.setExternalProductId(externalProductId);
         price.setCurrency(quote.currency() != null ? quote.currency() : "RUB");
         priceRepository.save(price);
+        log.debug("Обновление цен: запись в material_prices — компания={}, материал={}, цена={}",
+                companyId, materialId, quote.price());
     }
 }

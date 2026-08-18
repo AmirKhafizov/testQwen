@@ -13,8 +13,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Pure HTML/JSON extraction helpers for LemanaPro product pages.
- * Separated so unit tests can run without Playwright.
+ * Извлечение названия и цены из HTML карточки LemanaPro.
+ * Вынесено отдельно, чтобы unit-тесты работали без Playwright.
  */
 public final class PriceHtmlParser {
 
@@ -33,6 +33,7 @@ public final class PriceHtmlParser {
 
     public static Optional<ParsedProduct> parse(String html, String externalSku, String pageUrl) {
         if (html == null || html.isBlank()) {
+            log.warn("Разбор HTML: пустая страница для артикула [{}]", externalSku);
             return Optional.empty();
         }
 
@@ -42,13 +43,16 @@ public final class PriceHtmlParser {
         Optional<BigDecimal> price = extractPrice(doc, html);
 
         if (price.isEmpty()) {
-            log.debug("Price not found in HTML for sku={}", externalSku);
+            log.warn("Разбор HTML: цена не найдена для артикула [{}] (url={})", externalSku, pageUrl);
             return Optional.empty();
         }
 
+        log.debug("Разбор HTML: артикул [{}], название «{}», цена {}",
+                externalSku, name, price.get());
+
         return Optional.of(new ParsedProduct(
                 externalSku,
-                name != null ? name : "SKU " + externalSku,
+                name != null ? name : "Артикул " + externalSku,
                 price.get(),
                 "RUB",
                 pageUrl
@@ -69,16 +73,15 @@ public final class PriceHtmlParser {
     }
 
     private static Optional<BigDecimal> extractPrice(Document doc, String rawHtml) {
-        // 1) schema.org / microdata
         Element metaPrice = doc.selectFirst("meta[itemprop=price]");
         if (metaPrice != null) {
             Optional<BigDecimal> p = parseDecimal(metaPrice.attr("content"));
             if (p.isPresent()) {
+                log.debug("Разбор HTML: цена из meta[itemprop=price]");
                 return p;
             }
         }
 
-        // 2) common data attributes / UI classes used by DIY sites
         String[] cssSelectors = {
                 "[data-qa='product-price']",
                 "[data-testid='product-price']",
@@ -94,24 +97,27 @@ public final class PriceHtmlParser {
             for (Element el : els) {
                 Optional<BigDecimal> p = parseDecimal(el.attr("content"));
                 if (p.isPresent()) {
+                    log.debug("Разбор HTML: цена из селектора {} (content)", sel);
                     return p;
                 }
                 p = parseDecimal(el.attr("data-price"));
                 if (p.isPresent()) {
+                    log.debug("Разбор HTML: цена из селектора {} (data-price)", sel);
                     return p;
                 }
                 p = parseDecimal(el.text());
                 if (p.isPresent()) {
+                    log.debug("Разбор HTML: цена из селектора {} (текст)", sel);
                     return p;
                 }
             }
         }
 
-        // 3) regex over raw HTML (embedded JSON state)
         Matcher m = PRICE_NUMBER.matcher(rawHtml);
         if (m.find()) {
             Optional<BigDecimal> p = parseDecimal(m.group(1));
             if (p.isPresent()) {
+                log.debug("Разбор HTML: цена из встроенного JSON (price/mainPrice/value)");
                 return p;
             }
         }
@@ -119,7 +125,11 @@ public final class PriceHtmlParser {
         Matcher meta = META_PRICE.matcher(rawHtml);
         if (meta.find()) {
             String g = meta.group(1) != null ? meta.group(1) : meta.group(2);
-            return parseDecimal(g);
+            Optional<BigDecimal> p = parseDecimal(g);
+            if (p.isPresent()) {
+                log.debug("Разбор HTML: цена из regex itemprop=price");
+            }
+            return p;
         }
 
         return Optional.empty();
@@ -129,7 +139,6 @@ public final class PriceHtmlParser {
         if (raw == null || raw.isBlank()) {
             return Optional.empty();
         }
-        // keep digits, comma, dot; normalize comma to dot; strip spaces/nbsp
         String cleaned = raw
                 .replace('\u00A0', ' ')
                 .replace(" ", "")
@@ -138,7 +147,6 @@ public final class PriceHtmlParser {
         if (cleaned.isBlank() || cleaned.equals(".")) {
             return Optional.empty();
         }
-        // if multiple dots, keep first as decimal only if looks like price
         int firstDot = cleaned.indexOf('.');
         if (firstDot >= 0) {
             String head = cleaned.substring(0, firstDot + 1);

@@ -7,8 +7,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * Daily price refresh from LemanaPro.
- * Cron default: 10:00 Europe/Moscow every day.
+ * Ежедневное обновление цен с LemanaPro.
+ * По умолчанию: каждый день в 10:00 по Москве (Europe/Moscow).
  */
 @Component
 public class PriceUpdateScheduler {
@@ -29,19 +29,19 @@ public class PriceUpdateScheduler {
     )
     public void runDailyPriceUpdate() {
         if (!appProperties.getScheduler().isPriceUpdateEnabled()) {
-            log.debug("Price update scheduler is disabled");
+            log.debug("Планировщик цен: отключён (app.scheduler.price-update-enabled=false)");
             return;
         }
 
-        log.info("Starting scheduled LemanaPro price update (zone={})",
-                appProperties.getScheduler().getPriceUpdateZone());
+        String zone = appProperties.getScheduler().getPriceUpdateZone();
+        log.info("Планировщик цен: старт ежедневного обновления (часовой пояс={})", zone);
         long started = System.currentTimeMillis();
         try {
             int saved = priceUpdateService.updatePricesForAllCompanies();
-            log.info("Scheduled price update done in {} ms, rows={}",
-                    System.currentTimeMillis() - started, saved);
+            long tookMs = System.currentTimeMillis() - started;
+            log.info("Планировщик цен: готово за {} мс, сохранено записей цен — {}", tookMs, saved);
         } catch (Exception e) {
-            log.error("Scheduled price update failed", e);
+            log.error("Планировщик цен: сбой при обновлении — {}", e.getMessage(), e);
         }
     }
 }
