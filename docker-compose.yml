@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: cost-monitor-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cost_monitor
+      POSTGRES_USER: cost_monitor
+      POSTGRES_PASSWORD: cost_monitor
+    ports:
+      - "5432:5432"
+    volumes:
+      - cost_monitor_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cost_monitor -d cost_monitor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Full stack: app + db
+  # Start: docker compose --profile app up --build
+  app:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cost-monitor-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/cost_monitor
+      SPRING_DATASOURCE_USERNAME: cost_monitor
+      SPRING_DATASOURCE_PASSWORD: cost_monitor
+      # Scheduler stays on (10:00 MSK). Disable if needed:
+      # APP_SCHEDULER_PRICE_UPDATE_ENABLED: "false"
+      APP_LEMANA_HEADLESS: "true"
+      JAVA_OPTS: "-Xms256m -Xmx512m"
+    # Playwright needs shared memory for Chromium
+    shm_size: "1gb"
+
+volumes:
+  cost_monitor_pgdata:

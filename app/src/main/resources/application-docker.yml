@@ -1,0 +1,22 @@
+# Activated with SPRING_PROFILES_ACTIVE=docker
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://db:5432/cost_monitor}
+    username: ${SPRING_DATASOURCE_USERNAME:cost_monitor}
+    password: ${SPRING_DATASOURCE_PASSWORD:cost_monitor}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+
+logging:
+  level:
+    root: INFO
+    com.construction.costmonitor: INFO
+
+app:
+  lemana:
+    headless: true
+  scheduler:
+    price-update-enabled: true
