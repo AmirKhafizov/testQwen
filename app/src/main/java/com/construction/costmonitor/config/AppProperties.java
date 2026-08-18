@@ -19,15 +19,23 @@ public class AppProperties {
     }
 
     public static class Lemana {
+        /** parser | mock — mock, если Qrator отдаёт 403 */
+        private String provider = "parser";
         private String baseUrl = "https://kazan.lemanapro.ru";
         private long requestDelayMs = 2000;
         private String userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-        /** false — лучше проходит Qrator локально; true — для CI/Docker */
         private boolean headless = false;
         private long navigationTimeoutMs = 60_000;
-        /** Пусто = bundled Chromium; "chrome" = установленный Google Chrome (часто меньше блокировок) */
         private String browserChannel = "";
         private long qratorWaitMs = 12_000;
+
+        public String getProvider() {
+            return provider;
+        }
+
+        public void setProvider(String provider) {
+            this.provider = provider;
+        }
 
         public String getBaseUrl() {
             return baseUrl;

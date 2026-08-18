@@ -46,16 +46,14 @@ logging:
 # Custom
 app:
   lemana:
+    # parser = Playwright (часто 403 от Qrator) | mock = заглушка для разработки остального функционала
+    provider: mock
     base-url: https://kazan.lemanapro.ru
     request-delay-ms: 1500
-    # Актуальный UA
     user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36
-    # false — окно браузера, Qrator чаще пропускает; true — только для Docker/CI
     headless: false
     navigation-timeout-ms: 60000
-    # Ожидание прохождения challenge Qrator после навигации
     qrator-wait-ms: 12000
-    # Пусто = Playwright Chromium; chrome = системный Google Chrome (если установлен)
     browser-channel: ""
   scheduler:
     price-update-enabled: true
