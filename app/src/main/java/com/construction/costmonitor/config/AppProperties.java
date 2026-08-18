@@ -21,9 +21,13 @@ public class AppProperties {
     public static class Lemana {
         private String baseUrl = "https://kazan.lemanapro.ru";
         private long requestDelayMs = 2000;
-        private String userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-        private boolean headless = true;
-        private long navigationTimeoutMs = 45_000;
+        private String userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+        /** false — лучше проходит Qrator локально; true — для CI/Docker */
+        private boolean headless = false;
+        private long navigationTimeoutMs = 60_000;
+        /** Пусто = bundled Chromium; "chrome" = установленный Google Chrome (часто меньше блокировок) */
+        private String browserChannel = "";
+        private long qratorWaitMs = 12_000;
 
         public String getBaseUrl() {
             return baseUrl;
@@ -63,6 +67,22 @@ public class AppProperties {
 
         public void setNavigationTimeoutMs(long navigationTimeoutMs) {
             this.navigationTimeoutMs = navigationTimeoutMs;
+        }
+
+        public String getBrowserChannel() {
+            return browserChannel;
+        }
+
+        public void setBrowserChannel(String browserChannel) {
+            this.browserChannel = browserChannel;
+        }
+
+        public long getQratorWaitMs() {
+            return qratorWaitMs;
+        }
+
+        public void setQratorWaitMs(long qratorWaitMs) {
+            this.qratorWaitMs = qratorWaitMs;
         }
     }
 

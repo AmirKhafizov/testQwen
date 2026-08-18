@@ -25,15 +25,28 @@ import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Провайдер цен LemanaPro через Playwright (обход Qrator).
- *
- * Chromium: {@code npx playwright@1.47.0 install chromium}
+ * Провайдер цен LemanaPro через Playwright.
+ * Сайт защищён Qrator — headless часто получает HTTP 403.
+ * Локально: headless=false (окно браузера) или browser-channel=chrome.
  */
 @Component
 public class LemanaProParserProvider implements PriceProvider {
 
     private static final Logger log = LoggerFactory.getLogger(LemanaProParserProvider.class);
     public static final String SOURCE = "LEMANA_PRO_PARSER";
+
+    private static final String STEALTH_INIT = """
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            window.chrome = { runtime: {} };
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+              parameters.name === 'notifications'
+                ? Promise.resolve({ state: Notification.permission })
+                : originalQuery(parameters)
+            );
+            """;
 
     private final AppProperties appProperties;
     private final ReentrantLock lock = new ReentrantLock();
@@ -69,35 +82,40 @@ public class LemanaProParserProvider implements PriceProvider {
 
             try (BrowserContext context = browser.newContext(new Browser.NewContextOptions()
                     .setLocale("ru-RU")
+                    .setTimezoneId("Europe/Moscow")
                     .setUserAgent(appProperties.getLemana().getUserAgent())
-                    .setViewportSize(1366, 900)
+                    .setViewportSize(1440, 900)
+                    .setJavaScriptEnabled(true)
                     .setExtraHTTPHeaders(java.util.Map.of(
-                            "Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+                            "Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                            "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                            "Upgrade-Insecure-Requests", "1"
                     )))) {
+
+                context.addInitScript(STEALTH_INIT);
 
                 Page page = context.newPage();
                 page.setDefaultTimeout(appProperties.getLemana().getNavigationTimeoutMs());
 
-                // 1) Поиск
                 String encoded = URLEncoder.encode(sku, StandardCharsets.UTF_8);
                 List<String> searchUrls = List.of(
                         base + "/search/?q=" + encoded,
-                        base + "/search/?query=" + encoded,
                         "https://lemanapro.ru/search/?q=" + encoded
                 );
 
                 String productUrl = null;
+                boolean saw403 = false;
+
                 for (String searchUrl : searchUrls) {
                     log.info("Парсер LemanaPro: открываем поиск — {}", searchUrl);
-                    page.navigate(searchUrl, new Page.NavigateOptions()
-                            .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
-                    page.waitForTimeout(4000);
-
+                    navigateAndWaitQrator(page, searchUrl);
                     diagnosePage(page, sku);
 
-                    if (looksLikeQrator(page)) {
-                        log.warn("Парсер LemanaPro: похоже, сработала защита Qrator (пустая/challenge-страница). " +
-                                "Попробуйте headless=false или прокси.");
+                    if (isHttp403(page)) {
+                        saw403 = true;
+                        log.warn("Парсер LemanaPro: HTTP 403 (Qrator). headless={}, channel='{}'",
+                                appProperties.getLemana().isHeadless(),
+                                appProperties.getLemana().getBrowserChannel());
                         continue;
                     }
 
@@ -107,44 +125,49 @@ public class LemanaProParserProvider implements PriceProvider {
                     }
                 }
 
-                // 2) Прямой заход на карточку по известному шаблону URL (slug может отличаться — пробуем варианты)
                 if (productUrl == null) {
                     productUrl = tryOpenProductBySkuPatterns(page, base, sku);
                 }
 
                 if (productUrl == null) {
-                    log.warn("Парсер LemanaPro: товар с артикулом [{}] не найден (поиск и прямые URL)", sku);
+                    if (saw403) {
+                        log.error("Парсер LemanaPro: сайт отвечает 403. Рекомендации: " +
+                                "1) app.lemana.headless=false (уже по умолчанию), " +
+                                "2) app.lemana.browser-channel=chrome (нужен Google Chrome), " +
+                                "3) VPN/другая сеть, " +
+                                "4) позже — прокси.");
+                    } else {
+                        log.warn("Парсер LemanaPro: товар [{}] не найден в выдаче", sku);
+                    }
                     return Optional.empty();
                 }
 
-                log.info("Парсер LemanaPro: открываем карточку товара — {}", productUrl);
-                page.navigate(productUrl, new Page.NavigateOptions()
-                        .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
-                page.waitForTimeout(3000);
-
+                log.info("Парсер LemanaPro: открываем карточку — {}", productUrl);
+                navigateAndWaitQrator(page, productUrl);
                 diagnosePage(page, sku);
 
-                String html = page.content();
-                log.info("Парсер LemanaPro: HTML карточки, длина {} символов", html != null ? html.length() : 0);
+                if (isHttp403(page)) {
+                    log.error("Парсер LemanaPro: 403 на карточке товара");
+                    return Optional.empty();
+                }
 
+                String html = page.content();
                 Optional<PriceHtmlParser.ParsedProduct> parsed =
                         PriceHtmlParser.parse(html, sku, page.url());
 
                 if (parsed.isEmpty()) {
-                    // Иногда цена только после доп. ожидания
                     page.waitForTimeout(3000);
                     html = page.content();
                     parsed = PriceHtmlParser.parse(html, sku, page.url());
                 }
 
                 if (parsed.isEmpty()) {
-                    log.warn("Парсер LemanaPro: не удалось извлечь цену из HTML, артикул [{}], url={}",
-                            sku, page.url());
+                    log.warn("Парсер LemanaPro: цена не извлечена из HTML, url={}", page.url());
                     return Optional.empty();
                 }
 
                 PriceHtmlParser.ParsedProduct p = parsed.get();
-                log.info("Парсер LemanaPro: цена получена — артикул [{}], «{}», {} {}",
+                log.info("Парсер LemanaPro: цена получена — [{}] «{}» {} {}",
                         sku, p.productName(), p.price(), p.currency());
 
                 return Optional.of(new PriceQuote(
@@ -152,71 +175,104 @@ public class LemanaProParserProvider implements PriceProvider {
                         p.productName(),
                         p.price(),
                         p.currency(),
-                        p.productUrl() != null ? p.productUrl() : page.url()
+                        page.url()
                 ));
             }
         } catch (Exception e) {
-            log.error("Парсер LemanaPro: ошибка при получении цены для артикула [{}]: {}",
-                    sku, e.getMessage(), e);
+            log.error("Парсер LemanaPro: ошибка для [{}]: {}", sku, e.getMessage(), e);
             return Optional.empty();
         } finally {
             lock.unlock();
         }
     }
 
-    private void diagnosePage(Page page, String sku) {
-        try {
-            String title = page.title();
-            String url = page.url();
-            Object stats = page.evaluate("""
-                    (sku) => {
-                      const links = Array.from(document.querySelectorAll('a[href]')).map(a => a.href);
-                      const withSku = links.filter(h => h && h.includes(sku));
-                      const withProduct = links.filter(h => h && (h.includes('/product/') || h.includes('/p/')));
-                      return {
-                        linkCount: links.length,
-                        withSkuCount: withSku.length,
-                        withProductCount: withProduct.length,
-                        sampleWithSku: withSku.slice(0, 5),
-                        sampleProduct: withProduct.slice(0, 5),
-                        bodyTextLen: (document.body && document.body.innerText) ? document.body.innerText.length : 0
-                      };
-                    }
-                    """, sku);
-            log.info("Парсер LemanaPro: диагностика страницы title=«{}», url={}, stats={}", title, url, stats);
-        } catch (Exception e) {
-            log.debug("Парсер LemanaPro: не удалось снять диагностику: {}", e.getMessage());
+    private void navigateAndWaitQrator(Page page, String url) {
+        page.navigate(url, new Page.NavigateOptions()
+                .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
+
+        long waitMs = appProperties.getLemana().getQratorWaitMs();
+        long step = 1500;
+        long waited = 0;
+
+        while (waited < waitMs) {
+            page.waitForTimeout(step);
+            waited += step;
+
+            if (!isHttp403(page) && !looksLikeBareQrator(page)) {
+                // Контент появился
+                try {
+                    page.waitForLoadState();
+                } catch (Exception ignored) {
+                }
+                log.info("Парсер LemanaPro: страница загружена после ~{} мс (title=«{}»)",
+                        waited, safeTitle(page));
+                return;
+            }
+            log.debug("Парсер LemanaPro: ждём Qrator/контент… {}/{} мс, title=«{}»",
+                    waited, waitMs, safeTitle(page));
         }
+
+        log.warn("Парсер LemanaPro: таймаут ожидания Qrator ({} мс), title=«{}»",
+                waitMs, safeTitle(page));
     }
 
-    private boolean looksLikeQrator(Page page) {
+    private boolean isHttp403(Page page) {
         try {
-            String html = page.content();
-            if (html == null) {
-                return true;
-            }
-            String lower = html.toLowerCase();
-            if (lower.contains("__qrator") || lower.contains("qauth.js")) {
-                // После прохождения challenge страница может быть нормальной;
-                // считаем «плохой», только если почти нет контента
-                Object len = page.evaluate("() => document.body ? document.body.innerText.length : 0");
-                if (len instanceof Number n && n.intValue() < 80) {
-                    return true;
-                }
-            }
-            Object len = page.evaluate("() => document.body ? document.body.innerText.length : 0");
-            return len instanceof Number n && n.intValue() < 40;
+            String title = page.title();
+            return title != null && title.toUpperCase().contains("403");
         } catch (Exception e) {
             return false;
         }
     }
 
+    private boolean looksLikeBareQrator(Page page) {
+        try {
+            Object len = page.evaluate("() => document.body ? document.body.innerText.length : 0");
+            int bodyLen = len instanceof Number n ? n.intValue() : 0;
+            String html = page.content();
+            boolean hasQrator = html != null && (html.contains("__qrator") || html.contains("qauth.js"));
+            return hasQrator && bodyLen < 100;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String safeTitle(Page page) {
+        try {
+            return page.title();
+        } catch (Exception e) {
+            return "?";
+        }
+    }
+
+    private void diagnosePage(Page page, String sku) {
+        try {
+            Object stats = page.evaluate("""
+                    (sku) => {
+                      const links = Array.from(document.querySelectorAll('a[href]')).map(a => a.href);
+                      const withSku = links.filter(h => h && h.includes(sku));
+                      const withProduct = links.filter(h => h && h.includes('/product/'));
+                      return {
+                        linkCount: links.length,
+                        withSkuCount: withSku.length,
+                        withProductCount: withProduct.length,
+                        sampleWithSku: withSku.slice(0, 3),
+                        bodyTextLen: document.body ? document.body.innerText.length : 0
+                      };
+                    }
+                    """, sku);
+            log.info("Парсер LemanaPro: диагностика title=«{}» url={} stats={}",
+                    page.title(), page.url(), stats);
+        } catch (Exception e) {
+            log.debug("Диагностика не удалась: {}", e.getMessage());
+        }
+    }
+
     private String findProductUrl(Page page, String sku, String base) {
-        // JS: любые ссылки с артикулом
         Object result = page.evaluate("""
                 (sku) => {
                   const links = Array.from(document.querySelectorAll('a[href]')).map(a => a.href);
-                  const preferred = links.filter(h => h && h.includes(sku) && (h.includes('/product/') || h.includes('/p/')));
+                  const preferred = links.filter(h => h && h.includes(sku) && h.includes('/product/'));
                   if (preferred.length) return preferred[0];
                   const any = links.filter(h => h && h.includes(sku));
                   return any.length ? any[0] : null;
@@ -224,13 +280,11 @@ public class LemanaProParserProvider implements PriceProvider {
                 """, sku);
 
         if (result instanceof String s && !s.isBlank()) {
-            log.info("Парсер LemanaPro: ссылка на товар из DOM — {}", s);
-            return normalizeUrl(s, base);
+            log.info("Парсер LemanaPro: ссылка из DOM — {}", s);
+            return s.startsWith("http") ? s : base + s;
         }
 
-        // Fallback: Jsoup по HTML
-        String html = page.content();
-        Document doc = Jsoup.parse(html, page.url());
+        Document doc = Jsoup.parse(page.content(), page.url());
         Set<String> candidates = new LinkedHashSet<>();
         for (Element a : doc.select("a[href]")) {
             String href = a.absUrl("href");
@@ -239,87 +293,44 @@ public class LemanaProParserProvider implements PriceProvider {
             }
         }
         for (String c : candidates) {
-            if (c.contains("/product/") || c.contains("/p/")) {
-                log.info("Парсер LemanaPro: ссылка на товар из HTML — {}", c);
+            if (c.contains("/product/")) {
+                log.info("Парсер LemanaPro: ссылка из HTML — {}", c);
                 return c;
             }
         }
         if (!candidates.isEmpty()) {
-            String first = candidates.iterator().next();
-            log.info("Парсер LemanaPro: ссылка с артикулом (без /product/) — {}", first);
-            return first;
+            return candidates.iterator().next();
         }
-
-        log.info("Парсер LemanaPro: на странице нет ссылок, содержащих артикул [{}]", sku);
         return null;
     }
 
-    /**
-     * Пробуем типичные URL карточек: .../product/...-{sku}/ на kazan и на основном домене.
-     */
     private String tryOpenProductBySkuPatterns(Page page, String base, String sku) {
         List<String> guesses = new ArrayList<>();
-        // Часто slug заканчивается на -{sku}/
-        guesses.add(base + "/product/-" + sku + "/");
-        guesses.add("https://lemanapro.ru/product/-" + sku + "/");
-        guesses.add(base + "/product/" + sku);
-        guesses.add("https://lemanapro.ru/search/?q=" + sku);
-
-        // Из ранее известных реальных URL (ламинат и т.п.) — шаблон с артикулом в конце
-        // Playwright всё равно проверит, есть ли цена на странице
-        for (String guess : List.of(
-                "https://kazan.lemanapro.ru/product/laminat-dub-severnyy-33-klass-tolshchina-8-mm-2153-m-" + sku + "/",
-                "https://lemanapro.ru/product/laminat-dub-severnyy-33-klass-tolshchina-8-mm-2153-m-" + sku + "/"
-        )) {
-            if (sku.equals("81976749") || guess.contains(sku)) {
-                guesses.add(0, guess);
-            }
+        if ("81976749".equals(sku)) {
+            guesses.add("https://lemanapro.ru/product/laminat-dub-severnyy-33-klass-tolshchina-8-mm-2153-m-81976749/");
+            guesses.add("https://kazan.lemanapro.ru/product/laminat-dub-severnyy-33-klass-tolshchina-8-mm-2153-m-81976749/");
         }
+        guesses.add(base + "/search/?q=" + sku);
 
         for (String url : guesses) {
             try {
-                log.info("Парсер LemanaPro: пробуем прямой URL — {}", url);
-                page.navigate(url, new Page.NavigateOptions()
-                        .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
-                page.waitForTimeout(2500);
-
-                if (looksLikeQrator(page)) {
-                    log.warn("Парсер LemanaPro: Qrator на {}", url);
+                log.info("Парсер LemanaPro: прямой URL — {}", url);
+                navigateAndWaitQrator(page, url);
+                if (isHttp403(page)) {
                     continue;
                 }
-
-                String html = page.content();
-                // если в HTML есть артикул и похоже на карточку — берём
-                if (html != null && html.contains(sku)
-                        && (html.contains("itemprop") || html.toLowerCase().contains("price")
-                        || page.url().contains("/product/"))) {
-                    Optional<PriceHtmlParser.ParsedProduct> p =
-                            PriceHtmlParser.parse(html, sku, page.url());
-                    if (p.isPresent()) {
-                        log.info("Парсер LemanaPro: прямой URL сработал — {}", page.url());
-                        return page.url();
-                    }
-                    // даже без цены вернём URL — верхний уровень ещё раз распарсит после wait
-                    if (page.url().contains(sku) || page.url().contains("/product/")) {
-                        log.info("Парсер LemanaPro: страница товара открыта (цена пока не извлечена) — {}", page.url());
-                        return page.url();
-                    }
+                String found = findProductUrl(page, sku, base);
+                if (found != null) {
+                    return found;
+                }
+                if (page.url().contains("/product/") && page.content().contains(sku)) {
+                    return page.url();
                 }
             } catch (Exception e) {
-                log.debug("Парсер LemanaPro: прямой URL не открылся {}: {}", url, e.getMessage());
+                log.debug("Прямой URL не открылся: {}", e.getMessage());
             }
         }
         return null;
-    }
-
-    private static String normalizeUrl(String href, String base) {
-        if (href.startsWith("http")) {
-            return href;
-        }
-        if (href.startsWith("/")) {
-            return base + href;
-        }
-        return base + "/" + href;
     }
 
     private void ensureBrowser() {
@@ -327,21 +338,32 @@ public class LemanaProParserProvider implements PriceProvider {
             return;
         }
         boolean headless = appProperties.getLemana().isHeadless();
-        log.info("Парсер LemanaPro: запускаем браузер Chromium (headless={})", headless);
+        String channel = appProperties.getLemana().getBrowserChannel();
+        log.info("Парсер LemanaPro: запуск браузера headless={}, channel='{}'",
+                headless, channel == null ? "" : channel);
+
+        playwright = Playwright.create();
+        BrowserType.LaunchOptions opts = new BrowserType.LaunchOptions()
+                .setHeadless(headless)
+                .setArgs(java.util.List.of(
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-infobars",
+                        "--window-size=1440,900"
+                ));
+
+        if (channel != null && !channel.isBlank()) {
+            opts.setChannel(channel);
+        }
+
         try {
-            playwright = Playwright.create();
-            browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
-                    .setHeadless(headless)
-                    .setArgs(java.util.List.of(
-                            "--disable-blink-features=AutomationControlled",
-                            "--no-sandbox",
-                            "--disable-dev-shm-usage"
-                    )));
-            log.info("Парсер LemanaPro: браузер Chromium успешно запущен");
+            browser = playwright.chromium().launch(opts);
+            log.info("Парсер LemanaPro: браузер запущен");
         } catch (Exception e) {
-            log.error("Парсер LemanaPro: не удалось запустить Chromium. " +
-                    "Установите: npx playwright@1.47.0 install chromium. Причина: {}",
-                    e.getMessage(), e);
+            log.error("Парсер LemanaPro: не удалось запустить браузер. " +
+                    "Chromium: npx playwright@1.47.0 install chromium. " +
+                    "Или укажите app.lemana.browser-channel=chrome. Причина: {}", e.getMessage(), e);
             throw e;
         }
     }
@@ -351,7 +373,6 @@ public class LemanaProParserProvider implements PriceProvider {
         if (ms <= 0) {
             return;
         }
-        log.debug("Парсер LemanaPro: пауза {} мс между запросами", ms);
         try {
             Thread.sleep(ms);
         } catch (InterruptedException e) {
@@ -373,12 +394,12 @@ public class LemanaProParserProvider implements PriceProvider {
             if (browser != null) {
                 browser.close();
                 browser = null;
-                log.info("Парсер LemanaPro: браузер закрыт");
             }
             if (playwright != null) {
                 playwright.close();
                 playwright = null;
             }
+            log.info("Парсер LemanaPro: браузер закрыт");
         } finally {
             lock.unlock();
         }
